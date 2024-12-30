@@ -18,4 +18,4 @@ WORKDIR /app
 
 COPY --from=demo /app .
 
-CMD[ 'node' , 'index.js' ]
+CMD [ 'node' , 'index.js' ]
