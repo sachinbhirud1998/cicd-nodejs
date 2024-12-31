@@ -1,0 +1,59 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DOCKER_REGISTRY_USERNAME: "/myapp/docker-credentials/username"
+    DOCKER_REGISTRY_PASSWORD: "/myapp/docker-credentials/password"
+    DOCKER_REGISTRY_URL: "/myapp/docker-credentials/url"
+    EC2_HOST: "/myapp/ec2/host"
+    SSH_PRIVATE_KEY: "/myapp/ec2/ssh-key"
+  variables:
+    TERM: linux
+    DEBIAN_FRONTEND: noninteractive
+    APP_NAME: nodejs-app
+    CONTAINER_PORT: 8000
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - "apt-get update -y && apt-get install -y openssh-client"
+
+  pre_build:
+    commands:
+      - "mkdir -p ~/.ssh"
+      - "echo \"$SSH_PRIVATE_KEY\" > ~/.ssh/private_key"
+      - "chmod 600 ~/.ssh/private_key"
+      - "test -n \"$EC2_HOST\" || { echo \"Error: EC2_HOST is empty\"; exit 1; }"
+      - "test -n \"$SSH_PRIVATE_KEY\" || { echo \"Error: SSH_PRIVATE_KEY is empty\"; exit 1; }"
+      - "npm install"
+      - "echo \"$DOCKER_REGISTRY_PASSWORD\" | docker login \"$DOCKER_REGISTRY_URL\" -u \"$DOCKER_REGISTRY_USERNAME\" --password-stdin"
+
+  build:
+    commands:
+      - "echo \"Building and pushing Docker image...\""
+      - "IMAGE_TAG=\"$DOCKER_REGISTRY_URL/$DOCKER_REGISTRY_USERNAME/$APP_NAME:latest\""
+      - "docker build -t $IMAGE_TAG ."
+      - "docker push $IMAGE_TAG"
+
+  post_build:
+    commands:
+      - "echo \"Deploying to EC2...\""
+      - |
+        echo "$DOCKER_REGISTRY_PASSWORD" | ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker login $DOCKER_REGISTRY_URL -u $DOCKER_REGISTRY_USERNAME --password-stdin"
+      - |
+        ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker pull $DOCKER_REGISTRY_URL/$DOCKER_REGISTRY_USERNAME/$APP_NAME:latest"
+      - |
+        ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker stop $APP_NAME || true"
+      - |
+        ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker rm $APP_NAME || true"
+      - |
+        ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker run -d --name $APP_NAME --restart unless-stopped -p $CONTAINER_PORT:$CONTAINER_PORT $DOCKER_REGISTRY_URL/$DOCKER_REGISTRY_USERNAME/$APP_NAME:latest"
+      - |
+        ssh -i ~/.ssh/private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@$EC2_HOST "docker system prune -f"
+      - "echo \"Deployment completed successfully!\""
+
+cache:
+  paths:
+    - "node_modules/**/*"
