@@ -1,0 +1,61 @@
+version: 0.2
+env:
+  parameter-store:
+    AWS_REGION: "/myapp/aws/region"
+    AWS_ACCOUNT_ID: "/myapp/aws/account-id"
+    ECR_REPOSITORY: "/myapp/ecr/repository"
+    EC2_INSTANCE_ID: "/myapp/ec2/instance-id"
+  variables:
+    TERM: linux
+    DEBIAN_FRONTEND: noninteractive
+    APP_NAME: nodejs-app
+    CONTAINER_PORT: 8000
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - "echo Installing dependencies..."
+      - "apt-get update -y && apt-get install -y awscli unzip"
+      - "echo Installing Amazon SSM Agent..."
+      - |
+        if [ ! -f /usr/bin/amazon-ssm-agent ]; then
+          wget https://s3.${AWS_REGION}.amazonaws.com/amazon-ssm-${AWS_REGION}/latest/debian_amd64/amazon-ssm-agent.deb
+          dpkg -i amazon-ssm-agent.deb
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+        else
+          echo "Amazon SSM Agent is already installed."
+        fi
+  pre_build:
+    commands:
+      - "echo Logging into ECR..."
+      - "aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+      - "npm install"
+  build:
+    commands:
+      - "echo Building and pushing Docker image..."
+      - "IMAGE_TAG=\"$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:latest\""
+      - "docker build -t $IMAGE_TAG ."
+      - "docker push $IMAGE_TAG"
+  post_build:
+    commands:
+      - "echo Deploying to EC2 instance using SSM..."
+      - |
+        aws ssm send-command \
+          --document-name "AWS-RunShellScript" \
+          --targets "Key=instanceIds,Values=${EC2_INSTANCE_ID}" \
+          --parameters "commands=[
+            \"echo Running SSM Command...\",
+            \"aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\",
+            \"docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest\",
+            \"docker stop ${APP_NAME} || true\",
+            \"docker rm ${APP_NAME} || true\",
+            \"docker run -d --name ${APP_NAME} --restart unless-stopped -p ${CONTAINER_PORT}:${CONTAINER_PORT} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest\",
+            \"docker system prune -f\"
+          ]" \
+          --region "${AWS_REGION}"
+      - "echo Deployment completed successfully!"
+cache:
+  paths:
+    - "node_modules/*/"
